@@ -1,4 +1,9 @@
 {
-    "ZUSD": "1000.0",
-    "EUR.HOLD": "0.0000"
+    "zusd": "1000.0",
+    "ethereum": "0.1",
+    "bitcoin": "0.0",
+    "decentraland": "0.0",
+    "the-graph": "0.0",
+    "lisk": "0.0",
+    "siacoin": "0.0"
 }

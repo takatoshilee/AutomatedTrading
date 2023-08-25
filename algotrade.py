@@ -1,12 +1,10 @@
-import krakenex
-from pykrakenapi import KrakenAPI
+import requests
 import time
 import decimal
 import json
+import random
 
-# Initialize Kraken API
-k = krakenex.API()
-k.load_key('kraken.key')  # Load your API key
+COINGECKO_API_ENDPOINT = "https://api.coingecko.com/api/v3"
 
 def now():
     return decimal.Decimal(time.time())
@@ -16,17 +14,16 @@ def get_balance():
         try:
             return json.load(f)
         except:
-            # change this for the actual query to the database once the script is working
-            return {'ZUSD': '1000.0', 'EUR.HOLD': '0.0000'}
+            return {'zusd': '1000.0', 'eth': '0.0'}
 
 def update_balance(amount, name, price, sold):
     balance = get_balance()
     if sold:
-        balance.pop(name[:-4], None)
-        balance['ZUSD'] = str(float(balance['ZUSD']) + amount * price)
+        balance.pop(name.lower(), None)
+        balance['zusd'] = str(float(balance.get('zusd', 0)) + amount * price)
     else:
-        balance['ZUSD'] = str(float(balance['ZUSD']) - (amount * price))
-        balance[name[:-4]] = str(amount)
+        balance['zusd'] = str(float(balance.get('zusd', 0)) - (amount * price))
+        balance[name.lower()] = str(amount)
     save_balance(balance)
     return balance
 
@@ -34,23 +31,36 @@ def save_balance(data):
     with open('balance.json', 'w') as f:
         json.dump(data, f, indent=4)
 
-def get_crypto_data(pair, since):
-    ret = k.query_public('OHLC', data={'pair': pair, 'since': since})
-    return ret['result'][pair]
+def get_crypto_data(coin_id):
+    response = requests.get(f"{COINGECKO_API_ENDPOINT}/coins/{coin_id}/market_chart?vs_currency=usd&days=1")
+    print(response.text)  # Print the API response
+
+    if response.status_code == 200:
+        data = response.json()
+        prices = data.get('prices', [])
+        print("Prices fetched:", prices)
+        
+        # Update the prices list in the data dictionary for the specific cryptocurrency pair
+        data = load_crypto_data_from_file()
+        data[coin_id]['prices'] = prices
+        save_crypto_data(data)
+        
+        return [{'time': int(price[0] / 1000), 'price': price[1]} for price in prices]
+    else:
+        return []
+
+
 
 def get_purchasing_price(name):
     trades = load_trades()
     return trades[name][-1]['price_usd']
 
 def load_trades():
-    trades = {}
     with open('trades.json', 'r') as f:
         try:
-            trades = json.load(f)
+            return json.load(f)
         except:
-            for crypto in pairs:
-                trades[crypto] = []
-        return trades
+            return {pair: [] for pair in get_pairs()}
 
 def save_crypto_data(data):
     with open('data.json', 'w') as f:
@@ -92,10 +102,8 @@ def save_trade(close, name, bought, sold, amount):
         json.dump(trades, f, indent=4)
 
 def buy_crypto(crypto_data, name):
-    # execute trade
     analysis_data = clear_crypto_data(name)
-    # find what we can buy for
-    price = float(crypto_data[-1][4])
+    price = float(crypto_data[-1]['price'])
     funds = get_available_funds()
     amount = funds * (1 / price)
     balance = update_balance(amount, name, price, False)
@@ -105,8 +113,8 @@ def buy_crypto(crypto_data, name):
 def sell_crypto(crypto_data, name):
     balance = get_balance()
     analysis_data = clear_crypto_data(name)
-    price = float(crypto_data[-1][4])
-    amount = float(balance[name[:-4]])
+    price = float(crypto_data[-1]['price'])
+    amount = float(balance[name.lower()])
     balance = update_balance(amount, name, price, True)
     save_trade(price, name, False, True, amount)
     print('sell')
@@ -126,17 +134,24 @@ def delete_entries(data, key):
 
 def get_available_funds():
     balance = get_balance()
-    money = float(balance['ZUSD'])
-    cryptos_not_owned = 6 - (len(balance) - 2)
+    print("Balance:", balance)
+    money = float(balance['zusd'])
+    cryptos_not_owned = 6 - len([crypto for crypto in balance if crypto != 'zusd'])
+    print("Cryptos not owned:", cryptos_not_owned)
     funds = money / cryptos_not_owned
     return funds
 
-def bot(since, k, pairs):
+
+
+def bot(since, pairs):
     while True:
         for pair in pairs:
             trades = load_trades()
-            if len(trades[pair]) > 0:
-                crypto_data = get_crypto_data(pair, since)
+            print("Pairs:", pairs)
+            print("Trades keys:", trades.keys())
+            
+            if len(trades.get(pair, [])) > 0:
+                crypto_data = get_crypto_data(pair)
                 if trades[pair][-1]['sold'] or trades[pair][-1] is None:
                     # check if we should buy
                     check_data(pair, crypto_data, True)
@@ -144,18 +159,17 @@ def bot(since, k, pairs):
                     # check if we should sell
                     check_data(pair, crypto_data, False)
             else:
-                crypto_data = get_crypto_data(pair, since)
+                crypto_data = get_crypto_data(pair)
                 check_data(pair, crypto_data, True)
             time.sleep(20)
 
+
 def check_data(name, crypto_data, should_buy):
     high, low, close = 0, 0, 0
-    for b in crypto_data[-100:]:
-        if b not in ma[name]['prices']:
-            mva[name]['prices'].append(b)
-            high += float(b[2])
-            low += float(b[3])
-            close += float(b[4])
+    for price in crypto_data[-100:]:
+        high += float(price['price'])
+        low += float(price['price'])
+        close += float(price['price'])
     mva[name]['high'].append(high / 100)
     mva[name]['low'].append(low / 100)
     mva[name]['close'].append(close / 100)
@@ -196,7 +210,12 @@ def check_opportunity(data, name, sell, buy):
     areas = []
     for mva in reversed(data['close'][-5:]):
         area = 0
-        price = float(data['prices'][-1][3])
+        price = 0  # Initialize 'price' variable
+        if 'prices' in data and len(data['prices']) > 0:
+            price = float(data['prices'][-1]['price_usd'])
+        if price != 0:  # Check if price is not zero
+            areas.append(mva / price)  # Now 'price' is initialized properly
+
         if sell:
             purchase_price = float(get_purchasing_price(name))
             if price >= (purchase_price * 1.02):
@@ -205,7 +224,6 @@ def check_opportunity(data, name, sell, buy):
             if price < purchase_price:
                 print('Selling at a loss')
                 return True
-        areas.append(mva / price)
         if buy:
             counter = 0
             if count >= 5:
@@ -215,16 +233,43 @@ def check_opportunity(data, name, sell, buy):
                     return True
     return False
 
+
 def try_sell(data, name, crypto_data):
     make_trade = check_opportunity(data, name, True, False)
     if make_trade:
         sell_crypto(crypto_data, name)
 
 def get_pairs():
-    return ['XETHZUSD', 'XXBTZUSD', 'MANAUSD', 'GRTUSD', 'LSKUSD', 'SCUSD']
+    return ['ethereum', 'bitcoin', 'decentraland', 'the-graph', 'lisk', 'siacoin']
+
+# ... (other parts of the code above)
+
+def simulate_price_fluctuation(data):
+    for name in get_pairs():
+        if len(data[name]['prices']) > 0:
+            last_price = data[name]['prices'][-1]['price']
+        else:
+            last_price = 100.0  # Replace this with an initial price if needed
+        new_price = last_price * (1 + random.uniform(-0.01, 0.01))
+        data[name]['prices'].append({'time': int(time.time()), 'price': new_price})
+    save_crypto_data(data)
+
+
+def simulate_trading(data):
+    for name in get_pairs():
+        if random.random() < 0.5:
+            if random.random() < 0.5:
+                buy_crypto(data[name]['prices'], name)
+            else:
+                sell_crypto(data[name]['prices'], name)
+        time.sleep(random.randint(1, 5))
 
 if __name__ == '__main__':
     pairs = get_pairs()
-    since = str(int(time.time() - 43200))
+    since = int(time.time()) - 43200
     mva = load_crypto_data_from_file()
-    bot(since, k, pairs)
+    
+    while True:
+        simulate_price_fluctuation(mva)
+        simulate_trading(mva)
+        time.sleep(20)
